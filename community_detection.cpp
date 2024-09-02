@@ -4,134 +4,184 @@
 #include <set>
 #include <cmath>
 #include <omp.h>
+#include <algorithm>
 
-// Simple representation of a graph
 class Graph {
 public:
-    std::vector<std::vector<int>> adjMatrix;
-    std::vector<int> degrees;
+    std::map<int, std::vector<std::pair<int, int>>> adjList; // adjacency list: node -> (neighbor, weight)
+    std::map<int, int> degrees; // degree of each node
     int num_nodes;
 
-    Graph(int n) : num_nodes(n) {
-        adjMatrix.resize(n, std::vector<int>(n, 0));
-        degrees.resize(n, 0);
+    Graph() : num_nodes(0) {}
+
+    void addNode(int node) {
+        if (adjList.find(node) == adjList.end()) {
+            adjList[node] = std::vector<std::pair<int, int>>(); //initalize adj list for new node with empty list of edges
+            degrees[node] = 0; //initial node degree = 0
+            num_nodes++;
+        }
+    }
+
+// remove node (along with its connected edges)
+    void removeNode(int node) {
+        if (adjList.find(node) == adjList.end()) return; //check for node exist or not
+
+        // Remove edges connected to this node by: the iteration to all the neighbors; updates the degrees 
+        // this update done by minusing the weight of the edge
+        for (const auto& [neighbor, weight] : adjList[node]) {
+            degrees[neighbor] -= weight;
+        }
+        adjList.erase(node); //remove node
+        degrees.erase(node); //erase degree of the node
+        num_nodes--; 
     }
 
     void addEdge(int u, int v, int weight) {
-        adjMatrix[u][v] = weight;
-        adjMatrix[v][u] = weight;
+        if (u == v) return; // Avoidment of self-loops
+
+        addNode(u);
+        addNode(v);
+
+        // Add edge u -> v
+        adjList[u].emplace_back(v, weight);
         degrees[u] += weight;
+
+        // Add edge v -> u 
+        adjList[v].emplace_back(u, weight);
         degrees[v] += weight;
     }
 
+    // void removeEdge(int u, int v) {
+
+
+
+    // }
+
     int degree(int u) const {
-        return degrees[u];
+        auto it = degrees.find(u);
+        if (it != degrees.end()) {
+            return it->second;
+        }
+        return 0;
     }
 
-    const std::vector<int>& neighbors(int u) const {
-        return adjMatrix[u];
+    const std::vector<std::pair<int, int>>& neighbors(int u) const {
+        auto it = adjList.find(u);
+        if (it != adjList.end()) {
+            return it->second;
+        }
+        return {};
+    }
+
+    double modularity(const std::map<int, int>& community, int m) const {
+        double Q = 0.0;
+
+        // TODO: can paralyze this loop:
+        for (const auto& [u, neighbors] : adjList) {
+            for (const auto& [v, weight] : neighbors) {
+                if (community.at(u) == community.at(v)) {
+                    Q += weight - (degree(u) * degree(v)) / (2.0 * m);
+                }
+            }
+        }
+        return Q / (2.0 * m);
+    }
+
+    double modularityGain(int u, int community_c, const std::map<int, int>& community, int m, const std::map<int, int>& community_totals) const {
+        double gain = 0.0;
+        int sum_in = 0;
+        int sum_tot = community_totals.at(community_c);
+
+        for (const auto& [v, weight] : neighbors(u)) {
+            if (community.at(v) == community_c) {
+                sum_in += weight;
+            }
+        }
+
+        int k_i = degree(u);
+
+        gain = (sum_in + k_i) / (2.0 * m) - std::pow(sum_tot + k_i, 2) / (2.0 * m * m)
+               - sum_in / (2.0 * m) + std::pow(sum_tot, 2) / (2.0 * m * m) + std::pow(k_i, 2) / (2.0 * m * m);
+
+        return gain;
+    }
+
+    void louvainAlgorithm(std::map<int, int>& community) {
+        int m = 0; 
+
+        // finding total weight of edges
+        for (const auto& [node, neighbors] : adjList) {
+            for (const auto& [neighbor, weight] : neighbors) {
+                m += weight;
+            }
+        }
+        m /= 2;
+
+        std::map<int, int> community_totals;
+
+        // iterate on nodes to add to community_totals
+        for (const auto& [node, neighbors] : adjList) {
+            if (degree(node) > 0) {
+                community_totals[community[node]] += degree(node);
+            }
+        }
+
+        bool improvement = true;
+
+        // iteration until no improvement is found
+        while (improvement) {
+            improvement = false;
+            for (const auto& [u, neighbors] : adjList) {
+                int current_comm = community[u];
+                double best_gain = 0.0;
+                int best_community = current_comm;
+
+                // gain by moving community u to community v:
+                for (const auto& [v, weight] : neighbors) {
+                    if (community[u] != community[v]) {
+                        int neighbor_comm = community[v];
+                        double gain = modularityGain(u, neighbor_comm, community, m, community_totals);
+                        if (gain > best_gain) {
+                            best_gain = gain;
+                            best_community = neighbor_comm;
+                        }
+                    }
+                }
+
+                // updating community of node "u" if improvement happens:
+                if (best_community != current_comm) {
+                    community[u] = best_community;
+                    improvement = true;
+                    community_totals[current_comm] -= degree(u); //updating degrees
+                    community_totals[best_community] += degree(u);
+                }
+            }
+        }
     }
 };
 
-// Function to calculation modularity
-double modularity(const Graph& g, const std::map<int, int>& community, int m) {
-    double Q = 0.0;
-    #pragma omp parallel for reduction(+:Q)
-    for (int u = 0; u < g.num_nodes; ++u) {
-        for (int v = 0; v < g.num_nodes; ++v) {
-            if (g.adjMatrix[u][v] > 0 && community.at(u) == community.at(v)) {
-                Q += g.adjMatrix[u][v] - (g.degree(u) * g.degree(v)) / (2.0 * m);
-            }
-        }
-    }
-    return Q / (2.0 * m);
-}
-
-// Function to calculation modularity gain
-double modularityGain(const Graph& g, int u, int community_c, const std::map<int, int>& community, int m, const std::map<int, int>& community_totals) {
-    double gain = 0.0;
-    int sum_in = 0;
-    int sum_tot = community_totals.at(community_c);
-
-    for (int v = 0; v < g.num_nodes; ++v) {
-        if (g.adjMatrix[u][v] > 0 && community.at(v) == community_c) {
-            sum_in += g.adjMatrix[u][v];
-        }
-    }
-
-    int k_i = g.degree(u);
-
-    gain = (sum_in + k_i) / (2.0 * m) - std::pow(sum_tot + k_i, 2) / (2.0 * m * m)
-           - sum_in / (2.0 * m) + std::pow(sum_tot, 2) / (2.0 * m * m) + std::pow(k_i, 2) / (2.0 * m * m);
-
-    return gain;
-}
-
-// Function to detect communities using Louvain method
-void louvainAlgorithm(Graph& g, std::map<int, int>& community) {
-    int m = 0;
-    for (int u = 0; u < g.num_nodes; ++u) {
-        for (int v = 0; v < g.num_nodes; ++v) {
-            m += g.adjMatrix[u][v];
-        }
-    }
-    m /= 2;
-
-    std::map<int, int> community_totals;
-    for (int u = 0; u < g.num_nodes; ++u) {
-        community_totals[community[u]] += g.degree(u);
-    }
-
-    bool improvement = true;
-    while (improvement) {
-        improvement = false;
-        for (int u = 0; u < g.num_nodes; ++u) {
-            int current_comm = community[u];
-            double best_gain = 0.0;
-            int best_community = current_comm;
-
-            for (int v = 0; v < g.num_nodes; ++v) {
-                if (g.adjMatrix[u][v] > 0 && community[u] != community[v]) {
-                    int neighbor_comm = community[v];
-                    double gain = modularityGain(g, u, neighbor_comm, community, m, community_totals);
-                    if (gain > best_gain) {
-                        best_gain = gain;
-                        best_community = neighbor_comm;
-                    }
-                }
-            }
-
-            if (best_community != current_comm) {
-                community[u] = best_community;
-                improvement = true;
-                community_totals[current_comm] -= g.degree(u);
-                community_totals[best_community] += g.degree(u);
-            }
-        }
-    }
-}
-
 int main() {
-    // Initialize the graph
-    Graph g(6);
-    g.addEdge(0, 1, 1);  // ab
-    g.addEdge(0, 2, 2);  // ac
-    g.addEdge(1, 2, 3);  // bc
-    g.addEdge(2, 4, 8);  // ce
-    g.addEdge(3, 4, 1);  // de
-    g.addEdge(4, 5, 3);  // ef
-    g.addEdge(3, 5, 2);  // df
+    Graph g;
 
-    // Initialize communities
+    // TODO: input large graph file
+    g.addEdge(0, 1, 1);
+    g.addEdge(0, 2, 2);
+    g.addEdge(1, 2, 3);
+    g.addEdge(2, 4, 8);
+    g.addEdge(3, 4, 1);
+    g.addEdge(4, 5, 3);
+    g.addEdge(3, 5, 2);
+
+    // Initialized communities
     std::map<int, int> community;
-    for (int i = 0; i < 6; ++i) {
-        community[i] = i;  // Each node starts in its own community
+    for (const auto& [node, _] : g.adjList) {
+        community[node] = node; // Each node starts in its own community
     }
 
-    // Apply Louvain algorithm
-    louvainAlgorithm(g, community);
+    // Applay Louvain algorithm
+    g.louvainAlgorithm(community);
 
-    // Output the results
+    // Output results
     std::map<int, std::set<int>> communities;
     for (const auto& [node, comm] : community) {
         communities[comm].insert(node);
@@ -141,10 +191,36 @@ int main() {
     for (const auto& [comm, nodes] : communities) {
         std::cout << "Community " << comm << ": ";
         for (int node : nodes) {
-            std::cout << char('a' + node) << " ";
+            std::cout << node << " ";
+        }
+        std::cout << "\n";
+    }
+
+// TODO: plan something to make add/remove in a loop directly so it becomes dynamic;
+// current implementation: example for add/remove; same logic to be implemented if making dynamic (first need the graph)
+
+    g.addEdge(6, 7, 5);  // Add new edge
+    // g.removeEdge(0, 1); //Remove existing edge
+
+    // Recompute communities after modifications
+    g.louvainAlgorithm(community);
+
+    // Output the updated results
+    communities.clear();
+    for (const auto& [node, comm] : community) {
+        communities[comm].insert(node);
+    }
+
+    std::cout << "Updated Communities:\n";
+    for (const auto& [comm, nodes] : communities) {
+        std::cout << "Community " << comm << ": ";
+        for (int node : nodes) {
+            std::cout << node << " ";
         }
         std::cout << "\n";
     }
 
     return 0;
 }
+
+// TODO : calculation of modularity & communities(before --> after : add/remove edges and nodes)
